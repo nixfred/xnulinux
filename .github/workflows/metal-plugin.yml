@@ -5,7 +5,7 @@ name: metal-plugin
 on:
   workflow_dispatch:
   push:
-    branches: [ci/metal-plugin]
+    branches: [ci/metal-plugin, "ci-run/**"]
     paths:
       - .github/workflows/metal-plugin.yml
       - gpu/xnu-cpu-metal/**
