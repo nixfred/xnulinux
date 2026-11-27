@@ -27,7 +27,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q hfsprogs gdisk uuid-runtime "linux-modules-extra-$(uname -r)"
-          sudo modprobe hfsplus
+          sudo apt-get install -y -q hfsprogs gdisk uuid-runtime
+          # the module comes with the kernel's own modules on newer kernels and in linux-modules-extra on older ones
+          sudo modprobe hfsplus || { sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" && sudo modprobe hfsplus; }
+          grep -w hfsplus /proc/filesystems
       - name: The disk, made and checked
         run: tests/puredarwin-disk/run.sh
