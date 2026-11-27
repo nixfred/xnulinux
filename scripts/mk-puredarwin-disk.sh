@@ -16,7 +16,7 @@ ROOT=$1 OUT=$2 SIZE=${3:-1g}
 M=$(mktemp -d); D="$OUT.dmg"
 rm -f "$D"
 if [ "$(uname -s)" = Linux ]; then
-  uuid=$(uuidgen | tr a-z A-Z)
+  uuid=$(tr a-z A-Z < /proc/sys/kernel/random/uuid)
   truncate -s "$(echo "$SIZE" | tr a-z A-Z)" "$D"
   sgdisk -o -n 1:2048:0 -t 1:af00 -c 1:PureDarwin -u 1:"$uuid" "$D" >/dev/null
   sudo modprobe hfsplus
@@ -30,6 +30,14 @@ else
   trap 'hdiutil detach -quiet "$M" 2>/dev/null || true' EXIT
 fi
 sudo tar -xzf "$ROOT" -C "$M"
+if [ "$(uname -s)" = Linux ]; then
+  # Linux's hfsplus writes a hard link the old way, without the link chain macOS has kept since 10.5. XNU's hfs marks
+  # such a file as having a chain when it first touches it, and from then on fsck finds the volume corrupt ("Incorrect
+  # number of file hard links"). The root's few hard links (zsh and zsh-5.9.1) become files of their own here.
+  sudo find "$M" -xdev -type f -links +1 -print0 | while IFS= read -r -d '' f; do
+    sudo cp -p "$f" "$f.mkpd" && sudo mv -f "$f.mkpd" "$f"
+  done
+fi
 sudo rm -rf "$M/.fseventsd" "$M/.Spotlight-V100"
 F=$(mktemp)
 cat > "$F" <<'FSCK'

@@ -17,7 +17,7 @@ cat "$W/pd.conf"
 if [ "$(uname -s)" = Linux ]; then
   L=$(sudo losetup --show -fP -r "$W/pd.img")
   trap 'sudo umount "$M" 2>/dev/null || true; sudo losetup -d "$L" 2>/dev/null || true; rm -rf "$W"' EXIT
-  sudo fsck.hfsplus -n "${L}p1"
+  sudo fsck.hfsplus -fn "${L}p1"
   sudo mount -t hfsplus -o ro "${L}p1" "$M"
 else
   trap 'sudo hdiutil detach -quiet "$M" 2>/dev/null || true; rm -rf "$W"' EXIT

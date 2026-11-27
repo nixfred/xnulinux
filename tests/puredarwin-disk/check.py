@@ -11,7 +11,8 @@ The second form checks what the hosted kernel depends on: the GUID partition tab
 unique GUID is CONF's ROOT_UUID and BOOT_UUID (xnu.ko finds the root by it); the volume is HFS+ with a journal that has
 nothing to replay, and was unmounted cleanly (XNU refuses a dirty volume without a journal for good, and would replay
 a journal that still holds transactions over what the host wrote); every member of the tarball is on the volume
-with its type, mode, owner, group, size, content, link target and hard links; /sbin/fsck is the script's own.
+with its type, mode, owner, group, size, content and link target, a hard link as one file with its target on a Mac
+and as a file of its own on Linux; /sbin/fsck is the script's own.
 """
 import hashlib
 import io
@@ -24,6 +25,9 @@ import uuid
 
 HFS_PLUS = uuid.UUID('48465300-0000-11AA-AA11-00306543ECAC')
 OWN = {'.journal', '.journal_info_block'}		# the journal's two files (Linux shows them, a Mac hides them)
+# Linux's hfsplus writes a hard link without the link chain macOS has kept since 10.5; XNU's hfs then marks the file as
+# having one, and fsck finds the volume corrupt after the first boot. The script stores such files as copies there.
+LINUX = sys.platform == 'linux'
 
 
 def make_root(out):
@@ -145,10 +149,12 @@ def tree(root_tar, mount):
             want, have = want[1:] + [m.linkname], have[1:] + [os.readlink(p) if kind else None]
         elif m.isdir():
             kind = stat.S_ISDIR(st.st_mode)
-        elif m.islnk():		# a hard link: one file with its target
+        elif m.islnk():		# a hard link: one file with its target on a Mac, a file of its own on Linux (LINKED)
             kind = stat.S_ISREG(st.st_mode)
             target = m.linkname[2:] if m.linkname.startswith('./') else m.linkname
-            want, have = [inode.get(target)], [st.st_ino]
+            data = tar.extractfile(tar.getmember(m.linkname)).read()
+            want += [len(data), hashlib.sha256(data).hexdigest(), None if LINUX else inode.get(target)]
+            have += [st.st_size, hashlib.sha256(open(p, 'rb').read()).hexdigest() if kind else None, None if LINUX else st.st_ino]
         else:
             kind = stat.S_ISREG(st.st_mode)
             inode[name] = st.st_ino
@@ -157,12 +163,18 @@ def tree(root_tar, mount):
         if not kind or want != have:
             bad += 1
             print('differs:', name, 'want', want, 'have', have)
-    extra = []
+    extra, linked = [], []
     for d, dirs, files in os.walk(mount):
         for f in dirs + files:
             rel = os.path.relpath(os.path.join(d, f), mount)
             if rel not in names and rel not in OWN and rel != 'sbin/fsck':
                 extra.append(rel)
+            st = os.lstat(os.path.join(d, f))
+            if LINUX and stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                linked.append(rel)
+    if linked:
+        bad += 1
+        print('hard links written by Linux (no link chain: fsck fails after the first boot):', sorted(linked))
     if extra:
         bad += 1
         print('on the disk and not in the tarball:', sorted(extra))
