@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
+# The bridge by itself (scripts/build-m2v.sh), on lavapipe: test/test_m2v_compute.c runs test/vecadd.metal's kernel
+# through libxnu_m2v. The middle one of the three test layers (scripts/test-lavapipe.sh below it, scripts/test-bundle.sh above).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "$ROOT/build"
 
 # 1. Compile vecadd.metal -> vecadd.air -> vecadd.metallib via Xcode Metal toolchain
 xcrun -sdk macosx metal -c "$ROOT/test/vecadd.metal" -o "$ROOT/build/vecadd.air"
