@@ -11,7 +11,8 @@ build-time renderers (`ictool`/Icon Composer, `actool`, CoreImage).
 - `src/xnu-m2v-bridge/`: the Rust C-ABI bridge over metal2vulkan (`libxnu_m2v.dylib`).
 - `scripts/`: builds (arm64 and arm64e), host-side tests. The tests add the same two vectors a layer at a time, on a finished
   build: `test-lavapipe.sh` (the driver by itself, under the loader), `test-m2v.sh` (the bridge, from a metallib),
-  `test-bundle.sh` (the plugin, as a `MTLDevice`); `test-render-ci.sh` then draws through the plugin.
+  `test-bundle.sh` (the plugin, as a `MTLDevice`); `test-render-ci.sh` then draws through the plugin, and `test-rounds.sh`
+  runs the plugin's regression tests (`test/test_round*.mm` and the others), which need the bundle alone.
 - `scripts/fetch-sources.sh` fetches, at pinned revisions and **never committed**: metal2vulkan (GPL-2.0-or-later / LGPL-3.0-or-later),
   Vulkan-Loader (Apache-2.0), Mesa 26.3.1 (lavapipe, MIT), LLVM 22.1.8. None of it goes into XNU or the Linux kernel.
 

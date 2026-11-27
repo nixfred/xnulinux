@@ -89,12 +89,13 @@ jobs:
         with:
           name: XnuCpuMetal.bundle
           path: ${{ runner.temp }}/XnuCpuMetal.bundle.tar.gz
-      # the same sum on each layer, lowest first: the one that fails says where to look
+      # the same sum on each layer, lowest first (the one that fails says where to look), then the plugin's regression tests
       - name: Tests on the runner (lavapipe, the bridge, the plugin)
         run: |
           scripts/test-lavapipe.sh
           scripts/test-m2v.sh
           scripts/test-bundle.sh arm64
+          scripts/test-rounds.sh arm64
       - name: Render test on the runner (informative)
         continue-on-error: true
         run: scripts/test-render-ci.sh arm64
