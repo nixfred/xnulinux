@@ -141,3 +141,5 @@ void linux64_dump_threads(void);
 #endif
 
 #endif /* _LINUX64_LINUX64_H_ */
+
+#error "ci-run: a deliberate compile error, to see the job fail"
