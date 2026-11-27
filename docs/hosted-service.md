@@ -142,7 +142,7 @@ Apple's installer (`tart` or another Virtualization.framework installer).
 | Gap | Effect on the service |
 |---|---|
 | PureDarwin's userland `libcorecrypto` is PureDarwin's unaudited interim fork (§2.3) | replace it on the PureDarwin disk before offering it for anything that keeps secrets |
-| Making the macOS disk needs a Mac with Xcode and `tart` (`mk-macvm-disk.sh`), and the PureDarwin disk needs `hdiutil` (`mk-puredarwin-disk.sh`) | users need a Mac to make their macOS disk; a Linux disk maker (from the IPSW's APFS images) would remove that. Check `tart`'s own license for commercial use, or use another Virtualization.framework installer. The PureDarwin disk should move to a Linux build (`mkfs.hfsplus`) so the pipeline runs without a Mac |
+| Making the macOS disk needs a Mac with Xcode and `tart` (`mk-macvm-disk.sh`) | users need a Mac to make their macOS disk; a Linux disk maker (from the IPSW's APFS images) would remove that. Check `tart`'s own license for commercial use, or use another Virtualization.framework installer. The PureDarwin disk needs none: `mk-puredarwin-disk.sh` makes it on the Linux host (`mkfs.hfsplus`) as well |
 | One kit per macOS build, fixed segment slots | each macOS release needs a new kit before users can update |
 | AMFI relaxed (`amfi_get_out_of_my_way=1`) and SIP partly off (`lp-sip0`); the OS cryptex merged into the system volume | the hosted macOS is less locked down than a real Mac. State this in the service's documentation (`docs/production.md` §3) |
 | The keystore is fresh at every boot | FileVault-style data protection does not persist across reboots |
