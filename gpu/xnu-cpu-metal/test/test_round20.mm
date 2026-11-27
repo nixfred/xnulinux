@@ -48,6 +48,30 @@ static NSDictionary *getStats(id<MTLDevice> dev) {
     return [dev respondsToSelector:s] ? ((NSDictionary *(*)(id, SEL))objc_msgSend)(dev, s) : @{};
 }
 
+// Who makes a NoCopy buffer. Writable memory that comes with a deallocator the plugin first offers to the bridge, which
+// takes it as it is when its Vulkan device imports host memory (lavapipe does): contents is the caller's pointer and no
+// counter of the plugin moves. Where the bridge refuses (a device that does not import, or
+// XNU_CPU_METAL_FORCE_NOCOPY_FALLBACK=1) the plugin's own path makes the buffer and counts it ("aliased", or
+// "fallbackRemapErr"). Read-only memory and memory without a deallocator are the plugin's on every device. Tests 4 and 7
+// expect the counters of the path this device takes; scripts/test-rounds.sh runs the test on both.
+static bool gBridgeImports;
+static bool probeBridgeImports(id<MTLDevice> dev) {
+    size_t pageSz = (size_t)vm_page_size;
+    void *mem = mmap(nullptr, pageSz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (mem == MAP_FAILED) return false;
+    NSDictionary *s0 = getStats(dev);
+    bool imported;
+    @autoreleasepool {
+        id<MTLBuffer> b = [dev newBufferWithBytesNoCopy:mem length:pageSz options:MTLResourceStorageModeShared
+                                             deallocator:^(void *p, NSUInteger l) { munmap(p, l); }];
+        NSDictionary *s1 = getStats(dev);
+        imported = b && [s1[@"aliased"] unsignedLongLongValue] == [s0[@"aliased"] unsignedLongLongValue]
+                     && [s1[@"fallbackRemapErr"] unsignedLongLongValue] == [s0[@"fallbackRemapErr"] unsignedLongLongValue];
+        if (!b) munmap(mem, pageSz);
+    }
+    return imported;
+}
+
 static int test1_Alignment(id<MTLDevice> dev) {
     NSUInteger a1 = [dev minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm];
     NSUInteger a2 = [dev minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatRGBA16Float];
@@ -234,6 +258,20 @@ static int test4_AliasAndFallbackAndLifetime(id<MTLDevice> dev) {
             fprintf(stderr, "FAIL [4/8]: GPU output not visible in aliased ownedMem\n");
             return 1;
         }
+        // 4a again, with the GPU writing to the read-only buffer: the command buffer completes and the caller's memory is
+        // as it was (so it is on Apple's devices). A buffer the bridge had imported took the driver's write through the
+        // caller's read-only mapping: SIGBUS, and the process was gone.
+        id<MTLCommandBuffer> wcb = [q commandBuffer];
+        id<MTLBlitCommandEncoder> wblit = [wcb blitCommandEncoder];
+        [wblit fillBuffer:roBuf range:NSMakeRange(0, 64) value:0x7F];
+        [wblit endEncoding];
+        [wcb commit];
+        [wcb waitUntilCompleted];
+        if (wcb.status != MTLCommandBufferStatusCompleted || ((uint32_t *)roMem)[0] != 100 || ((uint32_t *)roMem)[63] != 163) {
+            fprintf(stderr, "FAIL [4/8]: a GPU write to a read-only NoCopy buffer: status %lu, the caller's memory [0]=%u [63]=%u (expected 4, 100, 163)\n",
+                    (unsigned long)wcb.status, ((uint32_t *)roMem)[0], ((uint32_t *)roMem)[63]);
+            return 1;
+        }
         (void)unalBuf;
     } // buffers released here!
 
@@ -250,6 +288,18 @@ static int test4_AliasAndFallbackAndLifetime(id<MTLDevice> dev) {
     uint64_t dUnal = [s1[@"fallbackUnaligned"] unsignedLongLongValue] - unal0;
     uint64_t dCopies = [s1[@"commitSyncCopies"] unsignedLongLongValue] - copies0;
 
+    if (gBridgeImports) {
+        // the buffer without a deallocator and the read-only one are the plugin's (1 each); the writable one with a
+        // deallocator is the bridge's (not "aliased"); the unaligned one is the bridge's to take or to refuse
+        if (dAliased != 0 || dNoDealloc != 1 || dRo != 1 || dUnal > 1 || dCopies != 0) {
+            fprintf(stderr, "FAIL [4/8]: stats on a device whose bridge imports: dAliased=%llu(exp 0) dNoDealloc=%llu(exp 1) dRo=%llu(exp 1) dUnal=%llu(exp 0 or 1) dCopies=%llu(exp 0)\n",
+                    (unsigned long long)dAliased, (unsigned long long)dNoDealloc, (unsigned long long)dRo, (unsigned long long)dUnal, (unsigned long long)dCopies);
+            return 1;
+        }
+        printf("PASS [4/8]: imported by the bridge (deallocator!=nil: contents is the caller's memory, GPU output there, deallocator once), noDealloc fallback (1), PROT_READ fallback (1, a GPU write to it harmless), unaligned fallback (%llu), 0 commit copies\n",
+               (unsigned long long)dUnal);
+        return 0;
+    }
     if (dAliased != 1 || dNoDealloc != 1 || dRo != 1 || dUnal != 1 || dCopies != 0) {
         fprintf(stderr, "FAIL [4/8]: stats dAliased=%llu(exp 1) dNoDealloc=%llu(exp 1) dRo=%llu(exp 1) dUnal=%llu(exp 1) dCopies=%llu(exp 0)\n",
                 (unsigned long long)dAliased, (unsigned long long)dNoDealloc, (unsigned long long)dRo, (unsigned long long)dUnal, (unsigned long long)dCopies);
@@ -395,12 +445,13 @@ static int test7_Wallpaper33MBZeroCopy(id<MTLDevice> dev) {
 
     wpBuf = nil;
 
-    if (dAliased != 1 || dCopies != 0 || dBytes != 0) {
-        fprintf(stderr, "FAIL [7/8]: 33MB wallpaper stats dAliased=%llu dCopies=%llu dBytes=%llu\n",
-                (unsigned long long)dAliased, (unsigned long long)dCopies, (unsigned long long)dBytes);
+    if (dAliased != (gBridgeImports ? 0u : 1u) || dCopies != 0 || dBytes != 0) {
+        fprintf(stderr, "FAIL [7/8]: 33MB wallpaper stats dAliased=%llu(exp %d) dCopies=%llu dBytes=%llu\n",
+                (unsigned long long)dAliased, gBridgeImports ? 0 : 1, (unsigned long long)dCopies, (unsigned long long)dBytes);
         return 1;
     }
-    printf("PASS [7/8]: 33 MB wallpaper buffer aliased (1) across 10 commits with commitSyncCopies=0, commitSyncBytes=0\n");
+    printf("PASS [7/8]: 33 MB wallpaper buffer %s across 10 commits with commitSyncCopies=0, commitSyncBytes=0\n",
+           gBridgeImports ? "imported by the bridge" : "aliased (1)");
     return 0;
 }
 
@@ -415,6 +466,36 @@ static int test8_NoDeallocatorConcurrentUnmapNoGuardCrash(id<MTLDevice> dev) {
         return 1;
     }
     size_t pageSz = (size_t)vm_page_size;
+    // First without a race: the caller unmaps the memory while a command buffer that reads the buffer still runs. Apple's
+    // devices hold the pages and the command buffer completes with the caller's data. (A buffer the bridge had imported
+    // was the caller's mapping itself: the driver read unmapped memory, SIGSEGV.)
+    @autoreleasepool {
+        const size_t len = 16 * pageSz, big = 64u << 20;
+        uint8_t *src = (uint8_t *)mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (src == MAP_FAILED) { fprintf(stderr, "FAIL [8/8]: mmap failed\n"); return 1; }
+        memset(src, 0x33, len);
+        id<MTLBuffer> buf = [dev newBufferWithBytesNoCopy:src length:len options:MTLResourceStorageModeShared deallocator:nil];
+        id<MTLBuffer> dst = [dev newBufferWithLength:len options:MTLResourceStorageModeShared];
+        id<MTLBuffer> w1 = [dev newBufferWithLength:big options:MTLResourceStorageModeShared];
+        id<MTLBuffer> w2 = [dev newBufferWithLength:big options:MTLResourceStorageModeShared];
+        if (!buf || !dst || !w1 || !w2) { fprintf(stderr, "FAIL [8/8]: alloc nil\n"); return 1; }
+        id<MTLCommandQueue> q = [dev newCommandQueue];
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        for (int i = 0; i < 24; i++)   // work that is still running when the memory goes
+            [blit copyFromBuffer:(i & 1) ? w2 : w1 sourceOffset:0 toBuffer:(i & 1) ? w1 : w2 destinationOffset:0 size:big];
+        [blit copyFromBuffer:buf sourceOffset:0 toBuffer:dst destinationOffset:0 size:len];
+        [blit endEncoding];
+        [cb commit];
+        munmap(src, len);
+        [cb waitUntilCompleted];
+        const uint8_t *got = (const uint8_t *)dst.contents;
+        if (cb.status != MTLCommandBufferStatusCompleted || got[0] != 0x33 || got[len - 1] != 0x33) {
+            fprintf(stderr, "FAIL [8/8]: memory unmapped while a command buffer read it: status %lu, the copy holds 0x%02x .. 0x%02x (expected 4, 0x33, 0x33)\n",
+                    (unsigned long)cb.status, got[0], got[len - 1]);
+            return 1;
+        }
+    }
     dispatch_queue_t deallocQ = dispatch_queue_create("com.xnu.test.mtl_dealloc", DISPATCH_QUEUE_SERIAL);
     const int kIters = 1000;
     for (int i = 0; i < kIters; i++) {
@@ -435,7 +516,7 @@ static int test8_NoDeallocatorConcurrentUnmapNoGuardCrash(id<MTLDevice> dev) {
         munmap(mem, pageSz);
     }
     dispatch_sync(deallocQ, ^{});
-    printf("PASS [8/8]: %d iterations of deallocator==nil concurrent munmap + async release under TASK_EXC_GUARD_VM_FATAL OK\n", kIters);
+    printf("PASS [8/8]: deallocator==nil memory unmapped while a command buffer read it, and %d iterations of concurrent munmap + async release under TASK_EXC_GUARD_VM_FATAL OK\n", kIters);
     return 0;
 }
 
@@ -446,6 +527,8 @@ int main(int argc, char **argv) {
         id<MTLDevice> dev = loadBundleDevice(bundlePath);
         if (!dev) return 1;
         printf("Device: %s (vm_page_size=%zu)\n", dev.name.UTF8String, (size_t)vm_page_size);
+        gBridgeImports = probeBridgeImports(dev);
+        printf("NoCopy buffers of writable memory with a deallocator: %s\n", gBridgeImports ? "the bridge imports the caller's memory" : "made by the plugin's own path");
         int rc = 0;
         rc |= test1_Alignment(dev);
         rc |= test2_YCbCrIOSurface(dev);

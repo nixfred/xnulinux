@@ -2516,10 +2516,21 @@ static id xcmDev_newBufferNoCopy(id self, SEL, void *pointer, NSUInteger length,
         const char *e = getenv("XNU_CPU_METAL_FORCE_NOCOPY_FALLBACK");
         sForceNoCopyFallback = (e && e[0] && e[0] != '0') ? 1 : 0;
     }
-    void *ctx = (!sForceNoCopyFallback && deallocator) ? (__bridge_retained void *)[deallocator copy] : nullptr;
-    Xm2vBuffer *b = sForceNoCopyFallback ? nullptr :
-        xm2v_buffer_new_no_copy_dealloc(gXm2vDevice, pointer, length, opts,
-                                        ctx ? xcmBufferDeallocCallback : nullptr, ctx);
+    // The bridge is offered the caller's memory only when the process can write all of it and it comes with a deallocator.
+    // On a Vulkan device that imports host memory (lavapipe) such a buffer IS the caller's mapping, and the driver reads
+    // and writes through it:
+    // - memory the process cannot write: a blit, a kernel or a render pass that wrote to the buffer took SIGBUS on the
+    //   driver's thread and the process was gone (Apple's devices complete the command buffer and leave the memory as
+    //   it was);
+    // - memory without a deallocator: nothing tells the caller when the GPU is done with it, and callers unmap it while
+    //   a command buffer that reads it still runs (CoreAnimation, see below): SIGSEGV in the driver (Apple's devices
+    //   hold the pages, and the command buffer completes with the caller's data).
+    // The path below, which is every buffer's on a device that does not import, keeps the GPU's side of these two in
+    // memory of its own.
+    bool import = !sForceNoCopyFallback && deallocator && xcmRangeIsFullyWritable(pointer, length);
+    void *ctx = import ? (__bridge_retained void *)[deallocator copy] : nullptr;
+    Xm2vBuffer *b = !import ? nullptr :
+        xm2v_buffer_new_no_copy_dealloc(gXm2vDevice, pointer, length, opts, xcmBufferDeallocCallback, ctx);
     if (!b) {
         if (ctx) (void)(__bridge_transfer id)ctx;
         size_t pageSz = (size_t)vm_page_size;
